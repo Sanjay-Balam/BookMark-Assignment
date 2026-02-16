@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 
 type Bookmark = {
@@ -23,21 +23,25 @@ export default function BookmarkManager({
   const [title, setTitle] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const supabase = useMemo(() => createClient(), [])
+  // useState initializer runs exactly once - immune to React Compiler optimizations
+  const [supabase] = useState(() => createClient())
 
   // Set up realtime subscription with auth
   useEffect(() => {
     let channel: ReturnType<typeof supabase.channel> | null = null
+    let isMounted = true
 
     const setupRealtime = async () => {
       // Get session and set auth token for realtime
       const { data: { session } } = await supabase.auth.getSession()
+      if (!isMounted) return
+
       if (session?.access_token) {
         supabase.realtime.setAuth(session.access_token)
       }
 
       channel = supabase
-        .channel('bookmarks-changes')
+        .channel(`bookmarks-${Date.now()}`)
         .on(
           'postgres_changes',
           {
@@ -62,7 +66,17 @@ export default function BookmarkManager({
             }
           }
         )
-        .subscribe()
+        .subscribe((status) => {
+          if (status === 'CHANNEL_ERROR') {
+            // Reconnect on error
+            if (channel && isMounted) {
+              supabase.removeChannel(channel)
+              setTimeout(() => {
+                if (isMounted) setupRealtime()
+              }, 1000)
+            }
+          }
+        })
     }
 
     setupRealtime()
@@ -77,6 +91,7 @@ export default function BookmarkManager({
     )
 
     return () => {
+      isMounted = false
       if (channel) supabase.removeChannel(channel)
       authSub.unsubscribe()
     }
